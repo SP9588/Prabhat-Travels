@@ -1,0 +1,6 @@
+{
+  "name": "Laxmi Travels - Hindi Vehicle Rental, Ride Booking & Commission Marketplace",
+  "description": "लक्ष्मी ट्रैवल्स - हिंदी में वाहन किराया, सवारी बुकिंग, डिलीवरी व एडमिन कमीशन व रेज़रपे नियंत्रण मंच। संचालक: संतोष प्रसाद।",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
