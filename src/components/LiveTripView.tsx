@@ -220,7 +220,7 @@ export const LiveTripView: React.FC<LiveTripViewProps> = ({
           <div className="flex items-center gap-2">
             <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
             <span className="font-mono text-emerald-300 font-semibold">
-              लाइव जीपीएस स्थिति: सक्रिय (GPS Active)
+              अनुमानित लाइव स्थान: केवल सक्रिय यात्रा के दौरान
             </span>
           </div>
           <div className="flex items-center gap-4 text-neutral-300 font-mono">
@@ -378,7 +378,7 @@ export const LiveTripView: React.FC<LiveTripViewProps> = ({
                   </button>
                 </div>
                 <p className="text-[11px] text-neutral-500">
-                  परीक्षण हेतु आप ऊपर दिया गया कोड दर्ज कर सकते हैं।
+                  ग्राहक द्वारा पिकअप पर साझा किया गया सुरक्षा कोड दर्ज करें।
                 </p>
               </form>
             ) : (

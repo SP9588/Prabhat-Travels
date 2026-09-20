@@ -42,8 +42,14 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
   const [passengerCount, setPassengerCount] = useState<number>(0);
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
+  const [phoneOtp, setPhoneOtp] = useState('');
+  const [phoneVerificationToken, setPhoneVerificationToken] = useState('');
+  const [phoneOtpSent, setPhoneOtpSent] = useState(false);
+  const [phoneOtpLoading, setPhoneOtpLoading] = useState(false);
+  const [privacyConsent, setPrivacyConsent] = useState(false);
   const [distanceKm, setDistanceKm] = useState<number>(0);
   const [durationMin, setDurationMin] = useState<number>(0);
+  const [pickupGps, setPickupGps] = useState<{ lat: number; lng: number } | undefined>();
   const [specialInstructions, setSpecialInstructions] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -79,6 +85,64 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
     if (passengerCount === 0) setPassengerCount(1);
   };
 
+  const handleUseApproximateLocation = () => {
+    setError(null);
+    if (!navigator.geolocation) {
+      setError('इस डिवाइस पर स्थान अनुमति उपलब्ध नहीं है।');
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        setPickupGps({
+          lat: Math.round(coords.latitude * 1000) / 1000,
+          lng: Math.round(coords.longitude * 1000) / 1000
+        });
+        setPickupAddress('अनुमानित वर्तमान स्थान (Approximate current location)');
+      },
+      () => setError('स्थान अनुमति नहीं मिली। आप पता स्वयं दर्ज कर सकते हैं।'),
+      { enableHighAccuracy: false, maximumAge: 60_000, timeout: 10_000 }
+    );
+  };
+
+  const handleSendPhoneOtp = async () => {
+    setError(null);
+    setPhoneOtpLoading(true);
+    try {
+      const res = await fetch('/api/auth/send-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customerPhone })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'OTP भेजने में विफल।');
+      setPhoneOtpSent(true);
+    } catch (err: any) {
+      setError(err.message || 'OTP भेजने में विफल।');
+    } finally {
+      setPhoneOtpLoading(false);
+    }
+  };
+
+  const handleVerifyPhoneOtp = async () => {
+    setError(null);
+    setPhoneOtpLoading(true);
+    try {
+      const res = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: customerPhone, otp: phoneOtp })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'OTP सत्यापन विफल।');
+      setPhoneVerificationToken(data.token);
+      setPhoneOtpSent(false);
+    } catch (err: any) {
+      setError(err.message || 'OTP सत्यापन विफल।');
+    } finally {
+      setPhoneOtpLoading(false);
+    }
+  };
+
   const handleBookingSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -93,7 +157,13 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
       return;
     }
 
-    if (!pickupAddress.trim() || !dropAddress.trim() || !customerPhone.trim()) {
+    if (
+      !pickupAddress.trim() ||
+      !dropAddress.trim() ||
+      !customerPhone.trim() ||
+      !phoneVerificationToken ||
+      !privacyConsent
+    ) {
       setError(t.errorMsg);
       return;
     }
@@ -107,8 +177,11 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
           serviceType: 'RIDE',
           customerName: customerName.trim() || 'यात्री (Chhattisgarh)',
           customerPhone,
+          phoneVerificationToken,
+          privacyConsent,
           vehicleCategory: selectedCategory,
           pickupAddress,
+          pickupGps,
           dropAddress,
           passengerCount,
           distanceKm: distanceKm || 0,
@@ -324,8 +397,29 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
                   placeholder="उदा. स्वामी विवेकानंद विमानतल (माना), रायपुर या रेलवे स्टेशन, बिलासपुर"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 focus:border-amber-600 focus:ring-2 focus:ring-amber-500/20 text-sm font-medium text-neutral-900 transition"
                 />
+                <button
+                  type="button"
+                  onClick={handleUseApproximateLocation}
+                  className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-semibold text-amber-700 hover:text-amber-900"
+                >
+                  <MapPin className="w-3.5 h-3.5" />
+                  अनुमति देकर अनुमानित वर्तमान स्थान उपयोग करें
+                </button>
               </div>
             </div>
+
+            <label className="flex items-start gap-2 text-[11px] text-neutral-600">
+              <input
+                type="checkbox"
+                checked={privacyConsent}
+                onChange={(e) => setPrivacyConsent(e.target.checked)}
+                className="mt-0.5"
+              />
+              <span>
+                मैं अनुमानित स्थान, अस्थायी यात्रा-ट्रैकिंग और बुकिंग/भुगतान डेटा के सीमित उपयोग व
+                retention से सहमत हूँ। मैं किसी भी समय सहमति वापस ले सकता/सकती हूँ।
+              </span>
+            </label>
 
             {/* Drop Location */}
             <div>
@@ -481,6 +575,35 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
                   placeholder="10-अंकीय मोबाइल नंबर"
                   className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 focus:border-amber-600 focus:ring-2 focus:ring-amber-500/20 text-sm font-medium text-neutral-900 transition"
                 />
+                <div className="mt-2 flex gap-2">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={phoneOtp}
+                    onChange={(e) => setPhoneOtp(e.target.value)}
+                    placeholder="OTP"
+                    disabled={!phoneOtpSent || phoneVerificationToken !== ''}
+                    className="min-w-0 flex-1 px-3 py-2 rounded-lg border border-neutral-300 text-sm"
+                  />
+                  {phoneVerificationToken ? (
+                    <span className="px-3 py-2 rounded-lg bg-emerald-50 text-emerald-700 text-xs font-semibold">
+                      मोबाइल सत्यापित
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={phoneOtpSent ? handleVerifyPhoneOtp : handleSendPhoneOtp}
+                      disabled={phoneOtpLoading || !customerPhone.trim()}
+                      className="px-3 py-2 rounded-lg bg-neutral-900 text-white text-xs font-semibold disabled:opacity-50"
+                    >
+                      {phoneOtpLoading ? '...' : phoneOtpSent ? 'OTP सत्यापित करें' : 'OTP भेजें'}
+                    </button>
+                  )}
+                </div>
+                <p className="mt-1 text-[10px] text-neutral-500">
+                  मोबाइल नंबर केवल आपकी स्वैच्छिक बुकिंग और सेवा-संपर्क के लिए लिया जाता है।
+                </p>
               </div>
             </div>
 
@@ -517,7 +640,7 @@ export const RideBookingView: React.FC<RideBookingViewProps> = ({
 
             <button
               type="submit"
-              disabled={loading || !capacityCheck.valid}
+              disabled={loading || !capacityCheck.valid || !phoneVerificationToken || !privacyConsent}
               id="btn-submit-booking"
               className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 disabled:opacity-50 text-white font-bold text-sm shadow-md shadow-amber-600/20 transition cursor-pointer flex items-center justify-center gap-2"
             >
