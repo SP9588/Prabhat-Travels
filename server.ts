@@ -28,9 +28,9 @@ app.use(express.json());
 let adminSettings: AdminCommercialSettings = {
   businessName: 'लक्ष्मी ट्रैवल्स (Laxmi Travels)',
   adminName: 'संतोष प्रसाद (Santosh Prasad)',
-  adminPhone: '9279120271',
-  developerPhone: '9297120291',
-  adminEmail: 'santoshprasad8891@gmail.com',
+  adminPhone: process.env.ADMIN_PHONE || '',
+  developerPhone: process.env.DEV_PHONE || '',
+  adminEmail: process.env.ADMIN_EMAIL || '',
   commissionType: 'PERCENTAGE',
   commissionPercent: 0,
   commissionFixed: 0,
@@ -59,13 +59,13 @@ let adminSettings: AdminCommercialSettings = {
   cancellationFee: 0,
   gstRate: 0,
   fuelSurcharge: 0,
-  driverArrivalRadiusMeters: 0,
-  driverArrivalWindowMinutes: 0,
-  isDevMode: true,
-  razorpayAccountId: 'acc_santosh_9297120291',
-  razorpayKeyId: 'rzp_test_santoshprasad',
-  razorpayKeySecret: 'secret_key_santosh_travels_9279',
-  razorpayWebhookSecret: 'whsec_laxmitravels_secure_9279',
+  driverArrivalRadiusMeters: 100,
+  driverArrivalWindowMinutes: 10,
+  isDevMode: false,
+  razorpayAccountId: process.env.RAZORPAY_ACCOUNT_ID || '',
+  razorpayKeyId: process.env.RAZORPAY_KEY_ID || '',
+  razorpayKeySecret: process.env.RAZORPAY_KEY_SECRET || '',
+  razorpayWebhookSecret: process.env.RAZORPAY_WEBHOOK_SECRET || '',
   allowCashOnDelivery: true,
   contactVisibility: true
 };
@@ -246,14 +246,77 @@ let financialLedger: FinancialLedgerEntry[] = [];
 let complaints: Complaint[] = [];
 let reviews: Review[] = [];
 
-// In-memory OTP storage for phone auth
-const activeAuthOtps = new Map<string, { otp: string; expiresAt: number; attempts: number }>();
+// Phone verification state is short-lived and never used to harvest contacts.
+const activeAuthOtps = new Map<string, { expiresAt: number; attempts: number }>();
+const verifiedPhoneTokens = new Map<string, { phone: string; expiresAt: number }>();
 
 // Helper to generate 4-digit cryptographically secure OTP
 function generate4DigitOtp(): string {
   const buf = crypto.randomBytes(2);
   const num = (buf.readUInt16BE(0) % 9000) + 1000;
   return num.toString();
+}
+
+function normalizePhone(phone: unknown): string {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length === 10 ? `+91${digits}` : `+${digits}`;
+}
+
+function approximateCoordinate(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function approximateLocation(location: { lat: number; lng: number }) {
+  return {
+    lat: approximateCoordinate(location.lat),
+    lng: approximateCoordinate(location.lng)
+  };
+}
+
+async function sendProviderVerification(phone: string): Promise<void> {
+  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID } = process.env;
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SERVICE_SID) {
+    throw new Error('OTP provider is not configured.');
+  }
+
+  const body = new URLSearchParams({ To: phone, Channel: 'sms' });
+  const response = await fetch(
+    `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/Verifications`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body
+    }
+  );
+  if (!response.ok) {
+    throw new Error('The OTP provider rejected the verification request.');
+  }
+}
+
+async function checkProviderVerification(phone: string, code: string): Promise<boolean> {
+  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_VERIFY_SERVICE_SID } = process.env;
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_VERIFY_SERVICE_SID) {
+    return false;
+  }
+
+  const body = new URLSearchParams({ To: phone, Code: code });
+  const response = await fetch(
+    `https://verify.twilio.com/v2/Services/${TWILIO_VERIFY_SERVICE_SID}/VerificationCheck`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body
+    }
+  );
+  if (!response.ok) return false;
+  const result = (await response.json()) as { status?: string };
+  return result.status === 'approved';
 }
 
 // ==================== REST API ROUTES ====================
@@ -287,72 +350,66 @@ app.patch('/api/settings', (req: Request, res: Response) => {
 });
 
 // 2. Auth & OTP
-app.post('/api/auth/send-otp', (req: Request, res: Response) => {
-  const { phone } = req.body;
-  if (!phone || String(phone).trim().length < 10) {
+app.post('/api/auth/send-otp', async (req: Request, res: Response) => {
+  const phone = normalizePhone(req.body.phone);
+  if (!phone || phone.replace(/\D/g, '').length < 10) {
     return res.status(400).json({ error: 'कृपया वैध 10-अंकीय मोबाइल नंबर दर्ज करें।' });
   }
 
-  const cleanPhone = String(phone).trim();
-  const otp = generate4DigitOtp();
+  const cleanPhone = phone;
   const expiresAt = Date.now() + 5 * 60 * 1000; // 5 mins
+  activeAuthOtps.set(cleanPhone, { expiresAt, attempts: 0 });
 
-  activeAuthOtps.set(cleanPhone, { otp, expiresAt, attempts: 0 });
-
-  // Check if this is Admin / Santosh / Developer phone
-  const isAdmin =
-    cleanPhone === adminSettings.adminPhone ||
-    cleanPhone === adminSettings.developerPhone ||
-    cleanPhone === '9279120271' ||
-    cleanPhone === '9297120291';
+  try {
+    await sendProviderVerification(cleanPhone);
+  } catch (error) {
+    console.error('OTP provider error:', error);
+    activeAuthOtps.delete(cleanPhone);
+    return res.status(503).json({ error: 'OTP सेवा अभी उपलब्ध नहीं है। कृपया बाद में पुनः प्रयास करें।' });
+  }
 
   res.json({
     success: true,
     message: `OTP सफलतापूर्वक ${cleanPhone} पर भेजा गया।`,
     expiresInSeconds: 300,
-    devOtp: adminSettings.isDevMode ? otp : undefined,
-    isAdmin
+    provider: 'twilio-verify'
   });
 });
 
-app.post('/api/auth/verify-otp', (req: Request, res: Response) => {
+app.post('/api/auth/verify-otp', async (req: Request, res: Response) => {
   const { phone, otp, role = 'CUSTOMER', name = 'उपयोगकर्ता' } = req.body;
-  const cleanPhone = String(phone || '').trim();
+  const cleanPhone = normalizePhone(phone);
   const record = activeAuthOtps.get(cleanPhone);
-
-  // In test/dev mode or default admin override
-  const isAdminPhone =
-    cleanPhone === adminSettings.adminPhone ||
-    cleanPhone === adminSettings.developerPhone ||
-    cleanPhone === '9279120271' ||
-    cleanPhone === '9297120291';
-
-  if (!record && !adminSettings.isDevMode) {
+  if (!record) {
     return res.status(400).json({ error: 'कृपया पहले OTP अनुरोध करें।' });
   }
 
-  if (record) {
-    if (Date.now() > record.expiresAt) {
-      activeAuthOtps.delete(cleanPhone);
-      return res.status(400).json({ error: 'OTP की समयावधि समाप्त हो चुकी है।' });
-    }
-    if (record.attempts >= 4) {
-      activeAuthOtps.delete(cleanPhone);
-      return res.status(429).json({ error: 'अधिकतम गलत प्रयास। कृपया नया OTP प्राप्त करें।' });
-    }
-    if (record.otp !== otp && otp !== '1234') {
-      record.attempts += 1;
-      return res.status(400).json({ error: 'गलत OTP! कृपया सही 4-अंकीय कोड दर्ज करें।' });
-    }
+  if (Date.now() > record.expiresAt) {
     activeAuthOtps.delete(cleanPhone);
+    return res.status(400).json({ error: 'OTP की समयावधि समाप्त हो चुकी है।' });
+  }
+  if (record.attempts >= 4) {
+    activeAuthOtps.delete(cleanPhone);
+    return res.status(429).json({ error: 'अधिकतम गलत प्रयास। कृपया नया OTP प्राप्त करें।' });
+  }
+  if (!(await checkProviderVerification(cleanPhone, String(otp || '').trim()))) {
+    record.attempts += 1;
+    return res.status(400).json({ error: 'गलत OTP! कृपया सही 4-अंकीय कोड दर्ज करें।' });
   }
 
-  const determinedRole = isAdminPhone ? 'ADMIN' : role;
+  activeAuthOtps.delete(cleanPhone);
+  const verificationToken = crypto.randomBytes(24).toString('hex');
+  verifiedPhoneTokens.set(verificationToken, { phone: cleanPhone, expiresAt: Date.now() + 30 * 60 * 1000 });
+
+  const isAdmin =
+    cleanPhone === normalizePhone(adminSettings.adminPhone) ||
+    cleanPhone === normalizePhone(adminSettings.developerPhone);
+  const determinedRole = isAdmin ? 'ADMIN' : role;
   const user = {
     id: `usr-${cleanPhone}`,
-    name: isAdminPhone ? 'संतोष प्रसाद (Admin / Owner)' : name,
+    name: isAdmin ? 'संतोष प्रसाद (Admin / Owner)' : name,
     phone: cleanPhone,
-    email: isAdminPhone ? adminSettings.adminEmail : `${cleanPhone}@laxmitravels.local`,
+    email: isAdmin ? adminSettings.adminEmail : `${cleanPhone}@laxmitravels.local`,
     role: determinedRole,
     language: 'hi',
     isVerified: true,
@@ -362,7 +419,7 @@ app.post('/api/auth/verify-otp', (req: Request, res: Response) => {
   res.json({
     success: true,
     user,
-    token: `token-${cleanPhone}-${Date.now()}`
+    token: verificationToken
   });
 });
 
@@ -546,6 +603,8 @@ app.post('/api/bookings', (req: Request, res: Response) => {
     customerId,
     customerName,
     customerPhone,
+    phoneVerificationToken,
+    privacyConsent,
     vehicleCategory,
     pickupAddress,
     pickupGps,
@@ -558,8 +617,17 @@ app.post('/api/bookings', (req: Request, res: Response) => {
     durationMinutes = 30
   } = req.body;
 
-  if (!customerPhone || !pickupAddress || !dropAddress || !vehicleCategory) {
+  const cleanPhone = normalizePhone(customerPhone);
+  const verification = verifiedPhoneTokens.get(String(phoneVerificationToken || ''));
+  if (!cleanPhone || !pickupAddress || !dropAddress || !vehicleCategory || !privacyConsent) {
     return res.status(400).json({ error: 'कृपया पिकअप, ड्रॉप और वाहन श्रेणी अवश्य चुनें।' });
+  }
+  if (
+    !verification ||
+    verification.phone !== cleanPhone ||
+    Date.now() > verification.expiresAt
+  ) {
+    return res.status(401).json({ error: 'बुकिंग से पहले मोबाइल OTP सत्यापन आवश्यक है।' });
   }
 
   // Calculate fare using current admin settings
@@ -595,21 +663,21 @@ app.post('/api/bookings', (req: Request, res: Response) => {
     id: bookingId,
     bookingNumber,
     serviceType: serviceType as 'RIDE' | 'RENTAL' | 'DELIVERY',
-    customerId: customerId || `cust-${customerPhone}`,
+    customerId: customerId || `cust-${cleanPhone}`,
     customerName: customerName || 'यात्री',
-    customerPhone,
+    customerPhone: cleanPhone,
     driverId: availableDriver?.id,
     driverName: availableDriver?.name,
     driverPhone: availableDriver?.phone,
-    driverGps: availableDriver?.currentGps || { lat: 21.2514, lng: 81.6296 },
+    driverGps: approximateLocation(availableDriver?.currentGps || { lat: 21.2514, lng: 81.6296 }),
     vehicleId: assignedVehicle?.id,
     vehicleNumber: assignedVehicle?.regNumber,
     vehicleModel: `${assignedVehicle?.brand} ${assignedVehicle?.model}`,
     vehicleCategory: vehicleCategory as VehicleCategory,
     pickupAddress,
-    pickupGps: pickupGps || { lat: 21.2514, lng: 81.6296 },
+    pickupGps: pickupGps ? approximateLocation(pickupGps) : { lat: 21.251, lng: 81.63 },
     dropAddress,
-    dropGps: dropGps || { lat: 21.1804, lng: 81.7388 },
+    dropGps: dropGps ? approximateLocation(dropGps) : { lat: 21.18, lng: 81.739 },
     passengerCount: Number(passengerCount),
     scheduledTime: scheduledTime || 'तुरंत (Immediate)',
     status: 'DRIVER_ASSIGNED',
@@ -624,6 +692,7 @@ app.post('/api/bookings', (req: Request, res: Response) => {
   };
 
   bookings.unshift(newBooking);
+  verifiedPhoneTokens.delete(String(phoneVerificationToken));
   res.status(201).json({
     success: true,
     message: 'सवारी बुकिंग सफलतापूर्वक बन गई है। ड्राइवर सौंपा गया है।',
@@ -661,7 +730,7 @@ app.post('/api/trips/:id/arrival', (req: Request, res: Response) => {
       booking.pickupGps.lng
     );
     // If greater than configured radius, warn unless dev mode
-    if (distMeters > adminSettings.driverArrivalRadiusMeters && !adminSettings.isDevMode) {
+    if (distMeters > adminSettings.driverArrivalRadiusMeters) {
       return res.status(400).json({
         error: `ड्राइवर पिकअप स्थान से ${distMeters} मीटर दूर है। अनुमत दायरा ${adminSettings.driverArrivalRadiusMeters} मीटर है।`
       });
@@ -690,7 +759,7 @@ app.post('/api/trips/:id/verify-otp-and-start', (req: Request, res: Response) =>
   }
 
   // Server-side strict OTP validation
-  if (String(otp).trim() !== String(booking.startOtp).trim() && otp !== '1234') {
+  if (String(otp).trim() !== String(booking.startOtp).trim()) {
     booking.otpAttempts = (booking.otpAttempts || 0) + 1;
     return res.status(400).json({ error: 'अमान्य OTP! कृपया ग्राहक से सही 4-अंकीय कोड प्राप्त करें।' });
   }
@@ -712,13 +781,13 @@ app.post('/api/trips/:id/location', (req: Request, res: Response) => {
   }
 
   const { lat, lng } = req.body;
-  if (lat && lng) {
-    booking.driverGps = { lat, lng };
+  if (typeof lat === 'number' && typeof lng === 'number') {
+    booking.driverGps = approximateLocation({ lat, lng });
     // Also update driver record
     if (booking.driverId) {
       const driver = drivers.find((d) => d.id === booking.driverId);
       if (driver) {
-        driver.currentGps = { lat, lng };
+        driver.currentGps = approximateLocation({ lat, lng });
       }
     }
   }
@@ -758,6 +827,7 @@ app.post('/api/trips/:id/complete', (req: Request, res: Response) => {
   booking.distanceKm = actualDistance;
   booking.durationMinutes = actualDuration;
   booking.status = 'TRIP_COMPLETED';
+  booking.driverGps = undefined;
   booking.endTime = new Date().toISOString();
   booking.paymentStatus = 'SUCCESS';
 
